@@ -1,0 +1,137 @@
+name: Build OnePlus 12 Android 14 6.1 Kernel non ksu
+
+on:
+  workflow_call:  # This allows this workflow to be called from another workflow
+  
+jobs:
+  build-kernel-a14-6-1:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Set CONFIG Environment Variable
+        run: |
+          # Set CONFIG dynamically based on matrix values
+          CONFIG="op12"
+          
+          # Set CONFIG as an environment variable for future steps
+          echo "CONFIG=$CONFIG" >> $GITHUB_ENV
+          
+          echo "CONFIG set to: $CONFIG"
+
+      - name: Install Repo
+        run: |
+          # Install dependencies
+          mkdir -p ./git-repo
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
+          chmod a+rx ./git-repo/repo
+          echo "REPO=$GITHUB_WORKSPACE/./git-repo/repo" >> $GITHUB_ENV
+
+      - name: Clone AnyKernel3 and Other Dependencies
+        run: |
+          echo "Cloning AnyKernel3 and other dependencies..."
+    
+          # Define the branch names using the matrix values
+          ANYKERNEL_BRANCH="android14-6.1"
+          SUSFS_BRANCH="gki-android14-6.1"
+
+          # Debug print the branches
+          echo "Using branch for AnyKernel3: $ANYKERNEL_BRANCH"
+          echo "Using branch for SUSFS: $SUSFS_BRANCH"
+
+          # Clone repositories using the branch names
+          git clone https://github.com/FairyBand/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+          git clone https://github.com/TheWildJames/kernel_patches.git
+      
+      - name: Initialize and Sync Kernel Source
+        run: |
+          echo "Creating folder for configuration: $CONFIG..."
+          mkdir -p "$CONFIG"
+          cd "$CONFIG"
+          
+          # Initialize and sync kernel source
+          echo "Initializing and syncing kernel source..."
+          $REPO init -u https://github.com/RealJohnGalt/opsm8650_kernel_manifest -b kplatform --repo-rev=v2.16
+          
+          # Sync repo and apply patches
+          $REPO --version
+          $REPO --trace sync -c -j$(nproc --all) --no-tags --fail-fast
+
+      - name: Run sed and perl Commands
+        run: |
+          echo "Changing to configuration directory: $CONFIG..."
+          cd "$CONFIG/kernel_platform"
+          
+          echo "Running sed commands..."
+          
+          # Run sed commands for modifications
+          sed -i 's/CONFIG_LTO=n/CONFIG_LTO=y/' "./common/arch/arm64/configs/gki_defconfig"
+          sed -i 's/CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "./common/arch/arm64/configs/gki_defconfig"
+          sed -i 's/CONFIG_LTO_CLANG_NONE=y/CONFIG_LTO_CLANG_THIN=y/' "./common/arch/arm64/configs/gki_defconfig"
+          sed -i 's/check_defconfig//' ./common/build.config.gki
+          sed -i '$s|echo "\$res"|echo "\$res-Nijika"|' ./common/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "\$res-Nijika"|' ./msm-kernel/scripts/setlocalversion
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          sed -i 's/-dirty//' ./common/scripts/setlocalversion
+          sed -i 's/-dirty//' ./msm-kernel/scripts/setlocalversion
+
+          sed -i '/echo "LTO $LTO "/i export LTO=thin' ./oplus/build/oplus_setup.sh
+          #sed -i 's/export RECOMPILE_KERNEL="1"/export RECOMPILE_KERNEL="0"/g' ./oplus/build/oplus_setup.sh
+          sed -i 's/export REPACK_IMG=true/export REPACK_IMG=false/g' ./oplus/build/oplus_setup.sh
+          
+          sed -i 's/^#\(choose_lto_type \$3\)/\1/' ./oplus/build/oplus_setup.sh
+          #sed -i 's/^#\(choose_target_build \$4\)/\1/' ./oplus/build/oplus_setup.sh
+          sed -i 's/^#\(choose_repack_img \$5\)/\1/' ./oplus/build/oplus_setup.sh
+
+         
+          # Run perl command to modify UTS_VERSION
+          perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="#1 SMP PREEMPT Sat Apr 20 04:20:00 UTC 2024"}' ./common/scripts/mkcompile_h
+
+      - name: Build the Kernel
+        run: |
+          echo "Changing to configuration directory: $CONFIG..."
+          cd "$CONFIG"
+          
+          echo "Building the kernel..."
+          rm -rf ./kernel_platform/common/android/abi_gki_protected_exports_*
+          rm -rf ./kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
+          #git config --global user.email "zl3004431@gmail.com"
+          #git config --global user.name "FairyBand"
+          #git add *
+          #git commit -s -a -m "getting rid of -dirty"
+          ./kernel_platform/oplus/build/oplus_build_kernel.sh pineapple gki
+   
+      - name: Create Bootimgs Folder and Copy Images
+        run: |
+          echo "Changing to configuration directory: $CONFIG..."
+          cd "$CONFIG"
+          
+          echo "Copying Image"
+          cp ./out/dist/Image ../AnyKernel3/Image
+          
+      - name: Create ZIP Files for Different Formats
+        run: |
+          echo "Creating zip files for all formats..."
+          cd ./AnyKernel3
+          
+          ZIP_NAME="Anykernel3-OP12-A15-android14-6.1.zip"
+          echo "Creating zip file $ZIP_NAME..."
+          zip -r "../$ZIP_NAME" ./*
+          
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.CONFIG }}
+          path: |
+            *.zip
